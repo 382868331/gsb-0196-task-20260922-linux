@@ -103,8 +103,12 @@ def validate_point(point: Any, path: str = "point") -> tuple[float, float, float
 
 
 def _freeze_depth(
-    values: Any, disabled: Any
-) -> tuple[tuple[tuple[float, ...], ...], tuple[tuple[bool, ...], ...]]:
+    values: Any, disabled: Any, far: Any = None
+) -> tuple[
+    tuple[tuple[float, ...], ...],
+    tuple[tuple[bool, ...], ...],
+    tuple[tuple[float, ...], ...],
+]:
     if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
         raise InvalidDepthMapError(
             "depth_map.values must be a 2D rectangular sequence of finite numbers"
@@ -142,9 +146,46 @@ def _freeze_depth(
         frozen_rows.append(tuple(fr))
     assert width is not None
 
+    # 远端深度层（区间深度）：缺省时与 values 完全相同（退化为单点）。
+    if far is None:
+        frozen_far = tuple(
+            tuple(frozen_rows[r][c] for c in range(width)) for r in range(h)
+        )
+    else:
+        if not isinstance(far, Sequence) or isinstance(far, (str, bytes)):
+            raise InvalidDepthMapError("far must be a 2D rectangular sequence of numbers")
+        if len(far) != h:
+            raise InvalidDepthMapError(
+                f"far has {len(far)} rows, expected {h} (same shape as values)"
+            )
+        ff_rows: list[tuple[float, ...]] = []
+        for r in range(h):
+            row = far[r]
+            if not isinstance(row, Sequence) or isinstance(row, (str, bytes)):
+                raise InvalidDepthMapError(f"far[{r}] must be a sequence of numbers")
+            if len(row) != width:
+                raise InvalidDepthMapError(
+                    f"far[{r}] has length {len(row)}, expected {width}"
+                )
+            ff: list[float] = []
+            for c in range(width):
+                v = _require_finite_number(row[c], f"far[{r}][{c}]", InvalidDepthMapError)
+                if v <= 0.0:
+                    raise InvalidDepthMapError(
+                        f"far[{r}][{c}] depth (camera z) must be > 0, got {v}"
+                    )
+                if v < frozen_rows[r][c]:
+                    raise InvalidDepthMapError(
+                        f"far[{r}][{c}]={v} must be >= near values[{r}][{c}]"
+                        f"={frozen_rows[r][c]}"
+                    )
+                ff.append(v)
+            ff_rows.append(tuple(ff))
+        frozen_far = tuple(ff_rows)
+
     if disabled is None:
         mask = tuple(tuple(False for _ in range(width)) for _ in range(h))
-        return tuple(frozen_rows), mask
+        return tuple(frozen_rows), mask, frozen_far
 
     if not isinstance(disabled, Sequence) or isinstance(disabled, (str, bytes)):
         raise InvalidDepthMapError("disabled must be a 2D rectangular bool sequence")
@@ -170,7 +211,15 @@ def _freeze_depth(
                 )
             fb.append(x)
         frozen_mask.append(tuple(fb))
-    return tuple(frozen_rows), tuple(frozen_mask)
+    return tuple(frozen_rows), tuple(frozen_mask), frozen_far
+
+
+def validate_depth_eps(depth_eps: Any) -> float:
+    """校验投影深度的不确定半径：非 bool 的有限非负实数。"""
+    eps = _require_finite_number(depth_eps, "depth_eps", InvalidParameterError)
+    if eps < 0.0:
+        raise InvalidParameterError(f"depth_eps must be >= 0, got {eps}")
+    return eps
 
 
 def validate_tolerance(abs_tol: Any, rel_tol: Any) -> tuple[float, float]:

@@ -14,7 +14,9 @@ from .errors import (
 from .types import Camera, DepthMap, Reason, View, ViewStatus, Visibility
 from .core import (
     DEFAULT_ABS_TOL,
+    DEFAULT_DEPTH_EPS,
     DEFAULT_REL_TOL,
+    classify_intervals,
     classify_points,
     classify_view,
     count_visible_views,
@@ -36,10 +38,12 @@ __all__ = [
     "InvalidParameterError",
     "classify_view",
     "classify_points",
+    "classify_intervals",
     "count_visible_views",
     "indices_visible_in_at_least_k",
     "DEFAULT_ABS_TOL",
     "DEFAULT_REL_TOL",
+    "DEFAULT_DEPTH_EPS",
     "MAX_DEPTH_WIDTH",
     "MAX_DEPTH_HEIGHT",
 ]

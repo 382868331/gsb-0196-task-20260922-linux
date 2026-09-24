@@ -42,23 +42,35 @@ class Visibility(enum.Enum):
     """单视图对单点的裁定结果。"""
 
     VISIBLE = "visible"
-    """投影 z 在深度图表面容差内。"""
+    """投影深度区间整体落入表面深度区间（含容差膨胀）内。"""
 
     OCCLUDED = "occluded"
-    """点在表面后方（投影 z 明显大于采样深度）。"""
+    """点在表面后方（投影深度区间整体明显远于表面 far 端）。"""
 
     IN_FRONT = "in_front"
-    """点在表面前方（投影 z 明显小于采样深度）。"""
+    """点在表面前方（投影深度区间整体明显近于表面 near 端）。"""
+
+    UNCERTAIN = "uncertain"
+    """投影深度区间与表面区间部分重叠/接触：既不能确定可见，也不能
+    确定遮挡。重叠区间绝不直接判 visible。"""
 
     UNKNOWN = "unknown"
-    """点在相机后方、投影越界、插值邻域缺失/被禁用。"""
+    """点在相机后方、投影深度区间退化到原点、投影越界、插值邻域
+    缺失/被禁用。"""
 
 
 class Reason(enum.Enum):
-    """``UNKNOWN`` 的细分原因；非 unknown 状态为 ``NONE``。"""
+    """裁定的细分原因。
+
+    - ``NONE``：visible / occluded / in_front 等确定裁定；
+    - ``DEPTH_INTERVAL_OVERLAP``：``UNCERTAIN``（区间重叠或仅端点接触）；
+    - 其余成员对应 ``UNKNOWN`` 的成因。
+    """
 
     NONE = "none"
+    DEPTH_INTERVAL_OVERLAP = "depth_interval_overlap"
     BEHIND_CAMERA = "behind_camera"
+    DEPTH_INTERVAL_AT_ORIGIN = "depth_interval_at_origin"
     OUT_OF_BOUNDS = "out_of_bounds"
     MISSING_NEIGHBOR = "missing_neighbor"
     MASKED_PIXEL = "masked_pixel"
@@ -104,21 +116,55 @@ class DepthMap:
       的相机 z（深度）。尺寸不超过 32x32。
     - ``disabled``: 与 ``values`` 同形状的布尔二维序列；``True`` 表示
       该像素被显式禁用。默认为全 False。
+    - ``far``: 可选的逐像素表面**远端**深度（相机 z）。给出后该像素
+      表面占据闭区间 ``[values[row][col], far[row][col]]``；缺省时
+      区间退化为单点 ``values``，即旧版点深度语义。
+
+    另见 :meth:`from_intervals`——以 (near, far) 两张图构造区间深度图。
     """
 
     values: tuple[tuple[float, ...], ...] = field(init=False)
     disabled: tuple[tuple[bool, ...], ...] = field(init=False)
+    far: tuple[tuple[float, ...], ...] = field(init=False)
+    """逐像素远端深度；与 ``values`` 同形，逐元素 ``far >= values``。"""
 
     def __init__(
         self,
         values: SequenceLike,
         disabled: SequenceLike | None = None,
+        far: SequenceLike | None = None,
     ) -> None:
         from .validation import _freeze_depth
 
-        vals, mask = _freeze_depth(values, disabled)
+        vals, mask, fars = _freeze_depth(values, disabled, far)
         object.__setattr__(self, "values", vals)
         object.__setattr__(self, "disabled", mask)
+        object.__setattr__(self, "far", fars)
+
+    @classmethod
+    def from_intervals(
+        cls,
+        near: SequenceLike,
+        far: SequenceLike,
+        disabled: SequenceLike | None = None,
+    ) -> DepthMap:
+        """以逐像素的近端/远端深度构造区间深度图。
+
+        ``near[row][col] <= far[row][col]``（必须严格有限且为正）；
+        两者相等即该像素退化为单点深度。
+        """
+        return cls(near, disabled, far)
+
+    @property
+    def is_interval(self) -> bool:
+        """是否至少有一个像素的 near < far（非退化区间）。"""
+        for r in range(len(self.values)):
+            vr = self.values[r]
+            fr = self.far[r]
+            for c in range(len(vr)):
+                if fr[c] != vr[c]:
+                    return True
+        return False
 
     @property
     def height(self) -> int:
@@ -155,13 +201,38 @@ class ViewStatus:
     visibility: Visibility
     reason: Reason
     projected_z: float | None
-    """相机坐标 z；``behind_camera`` 时仍给出（<=0），其余无法投影时为 None。"""
+    """相机坐标 z（点区间的中点）；``behind_camera`` 时仍给出（<=0），
+    其余无法投影时为 None。"""
     sampled_depth: float | None
-    """双线性采样深度；无法采样时为 None。"""
+    """双线性采样的表面**近端**深度；退化（单点）深度图即表面深度
+    本身。无法采样时为 None。"""
     u: float | None
     """像素列坐标；无法计算时为 None。"""
     v: float | None
     """像素行坐标；无法计算时为 None。"""
+    projected_z_low: float | None = None
+    """投影深度区间近端 ``cz - depth_eps``（区间可能退化）；
+    ``behind_camera`` 时仍给出，其余无法投影时为 None。"""
+    projected_z_high: float | None = None
+    """投影深度区间远端 ``cz + depth_eps``。"""
+    sampled_depth_far: float | None = None
+    """双线性采样的表面**远端**深度；退化深度图时等于
+    ``sampled_depth``；无法采样时为 None。"""
+
+    @property
+    def depth_interval(self) -> tuple[float, float] | None:
+        """表面采样深度区间 ``[near, far]``；无法采样时为 None。"""
+        if self.sampled_depth is None or self.sampled_depth_far is None:
+            return None
+        return self.sampled_depth, self.sampled_depth_far
+
+    @property
+    def projected_interval(self) -> tuple[float, float] | None:
+        """投影深度区间 ``[cz-eps, cz+eps]``；点整体在相机后方时仍给出
+        （两端 <=0），其他无法投影的情形为 None。"""
+        if self.projected_z_low is None or self.projected_z_high is None:
+            return None
+        return self.projected_z_low, self.projected_z_high
 
 
 # 构造时接受的“类序列”输入（list/tuple 等可下标、可迭代的有限容器）。
