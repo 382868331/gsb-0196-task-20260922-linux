@@ -95,3 +95,51 @@ def const_depth(w, h, d, disabled=None):
     else:
         mask = [row[:] for row in disabled]
     return vals, mask
+
+
+def interval_classify(values, disabled, u, v, z_near, z_far, abs_tol, rel_tol):
+    """深度区间裁定的独立参考（不导入被测包，逻辑独立重写）。
+
+    给定像素射线 (u,v) 与点深度闭区间 [z_near, z_far]，返回字典：
+    visibility/reason/surface_lo/surface_hi。表面范围为该亚像素处
+    双线性插值深度 d 的容差带 [d-T, d+T]，T=abs_tol+rel_tol*d。
+    """
+    h = len(values)
+    w = len(values[0])
+    # 1) 整条段在相机后方。
+    if z_far <= 0.0:
+        return {"visibility": "unknown", "reason": "behind_camera"}
+    # 2) stencil 可用性（与标量参考同一判定，独立书写一遍）。
+    if u < 0.0 or v < 0.0 or u >= w or v >= h:
+        return {"visibility": "unknown", "reason": "out_of_bounds"}
+    cu, cv = math.floor(u), math.floor(v)
+    if cu + 1 > w - 1 or cv + 1 > h - 1:
+        return {"visibility": "unknown", "reason": "missing_neighbor"}
+    corners = ((cv, cu), (cv, cu + 1), (cv + 1, cu), (cv + 1, cu + 1))
+    if any(disabled[r][c] for r, c in corners):
+        return {"visibility": "unknown", "reason": "masked_pixel"}
+    # 3) 跨原点退化（像素有效时）。
+    if z_near <= 0.0 < z_far:
+        return {"visibility": "uncertain",
+                "reason": "depth_span_crosses_origin"}
+    # 4) 双线性表面深度与容差带。
+    fu, fv = u - cu, v - cv
+    d = (
+        (1 - fu) * (1 - fv) * values[cv][cu]
+        + fu * (1 - fv) * values[cv][cu + 1]
+        + (1 - fu) * fv * values[cv + 1][cu]
+        + fu * fv * values[cv + 1][cu + 1]
+    )
+    t = abs_tol + rel_tol * d
+    d_lo, d_hi = d - t, d + t
+    # 5) 闭区间比较。
+    if z_near >= d_lo and z_far <= d_hi:
+        vis, why = "visible", "none"
+    elif z_near > d_hi:
+        vis, why = "occluded", "none"
+    elif z_far < d_lo:
+        vis, why = "in_front", "none"
+    else:
+        vis, why = "uncertain", "interval_overlap"
+    return {"visibility": vis, "reason": why,
+            "surface_lo": d_lo, "surface_hi": d_hi, "depth": d}

@@ -27,7 +27,11 @@ import enum
 from dataclasses import dataclass, field
 from typing import TypeAlias
 
-from .errors import InvalidCameraError, InvalidDepthMapError
+from .errors import (
+    InvalidCameraError,
+    InvalidDepthMapError,
+    InvalidParameterError,
+)
 
 Vec3: TypeAlias = tuple[float, float, float]
 Mat3: TypeAlias = tuple[Vec3, Vec3, Vec3]
@@ -53,6 +57,10 @@ class Visibility(enum.Enum):
     UNKNOWN = "unknown"
     """点在相机后方、投影越界、插值邻域缺失/被禁用。"""
 
+    UNCERTAIN = "uncertain"
+    """深度区间裁定专用：无法证明确定可见也无法证明确定遮挡
+    （区间部分重叠/点接触，或区间跨过相机原点 z=0）。"""
+
 
 class Reason(enum.Enum):
     """``UNKNOWN`` 的细分原因；非 unknown 状态为 ``NONE``。"""
@@ -62,6 +70,10 @@ class Reason(enum.Enum):
     OUT_OF_BOUNDS = "out_of_bounds"
     MISSING_NEIGHBOR = "missing_neighbor"
     MASKED_PIXEL = "masked_pixel"
+    INTERVAL_OVERLAP = "interval_overlap"
+    """区间裁定：点区间与容差化表面区间仅接触或部分重叠。"""
+    DEPTH_SPAN_CROSSES_ORIGIN = "depth_span_crosses_origin"
+    """点区间与表面深度跨度的并集跨过相机原点 z=0，投影不自洽。"""
 
 
 @dataclass(frozen=True)
@@ -148,6 +160,38 @@ class View:
 
 
 @dataclass(frozen=True)
+class DepthInterval:
+    """世界点沿视线的相机 z 深度闭区间 ``[z_near, z_far]``。
+
+    用于把标量深度推广为区间：当点本身的深度（例如立体/测距结果）
+    只能确定落在某一范围时，用本对象代替点三元组传入裁定函数。
+
+    - ``z_near <= z_far``，二者均为有限数；**允许 <= 0**，以便把
+      “区间跨过相机原点 z=0”作为可定位的退化情形显式裁定为
+      ``uncertain/depth_span_crosses_origin``，而不是在校验阶段静默丢弃。
+    - ``z_near == z_far`` 是退化（零宽度）区间，语义合法。
+    """
+
+    z_near: float
+    z_far: float
+
+    def __post_init__(self) -> None:
+        from .validation import validate_depth_interval
+
+        z_near, z_far = validate_depth_interval(self.z_near, self.z_far)
+        object.__setattr__(self, "z_near", z_near)
+        object.__setattr__(self, "z_far", z_far)
+
+    @property
+    def width(self) -> float:
+        """区间宽度 ``z_far - z_near``（>= 0）。"""
+        return self.z_far - self.z_near
+
+    def as_tuple(self) -> tuple[float, float]:
+        return (self.z_near, self.z_far)
+
+
+@dataclass(frozen=True)
 class ViewStatus:
     """一个点在一个视图下的完整裁定。"""
 
@@ -155,13 +199,48 @@ class ViewStatus:
     visibility: Visibility
     reason: Reason
     projected_z: float | None
-    """相机坐标 z；``behind_camera`` 时仍给出（<=0），其余无法投影时为 None。"""
+    """标量裁定：相机坐标 z（``behind_camera`` 时 <=0，其余无法投影时
+    为 None）。区间裁定恒为 None，改用 ``depth_interval``。"""
     sampled_depth: float | None
-    """双线性采样深度；无法采样时为 None。"""
+    """双线性采样表面深度；无法采样时为 None。区间裁定时给出该像素处
+    双线性表面值（与点深度无关），表面容差范围另见 ``surface_interval``。"""
     u: float | None
     """像素列坐标；无法计算时为 None。"""
     v: float | None
     """像素行坐标；无法计算时为 None。"""
+    depth_interval: tuple[float, float] | None = None
+    """区间裁定时查询的相机 z 闭区间 ``[z_near, z_far]``；标量裁定为 None。"""
+    surface_interval: tuple[float, float] | None = None
+    """区间裁定时表面容差带 ``[d-T, d+T]``（d 为该亚像素处双线性
+    采样深度）；无法采样或标量裁定时为 None。"""
+
+
+@dataclass(frozen=True)
+class IntervalQuery:
+    """区间裁定查询：像素视线 ``(u, v)`` 与沿该视线的深度区间。
+
+    同一条针孔光线上、相机 z 落在 ``interval`` 内的点投影像素恒为
+    ``(u, v)``，因此区间裁定不需要世界点：像素射线 + z 区间即完整
+    描述。``u``/``v`` 允许落在图外（裁定为 ``unknown/out_of_bounds``），
+    但必须是有限实数（拒绝 bool / NaN / Infinity）。
+    """
+
+    u: float
+    v: float
+    interval: DepthInterval
+
+    def __post_init__(self) -> None:
+        from .validation import _require_finite_number
+
+        if not isinstance(self.interval, DepthInterval):
+            raise InvalidParameterError(
+                "IntervalQuery.interval must be a visibility.DepthInterval "
+                f"instance, got {type(self.interval).__name__}"
+            )
+        u = _require_finite_number(self.u, "query.u", InvalidParameterError)
+        v = _require_finite_number(self.v, "query.v", InvalidParameterError)
+        object.__setattr__(self, "u", u)
+        object.__setattr__(self, "v", v)
 
 
 # 构造时接受的“类序列”输入（list/tuple 等可下标、可迭代的有限容器）。

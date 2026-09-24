@@ -191,3 +191,23 @@ def validate_k(k: Any, n_views: int) -> int:
             f"k must be in [1, {n_views}] (number of views), got {k}"
         )
     return k
+
+
+def validate_depth_interval(z_near: Any, z_far: Any) -> tuple[float, float]:
+    """校验相机 z 深度闭区间 ``[z_near, z_far]``。
+
+    两端必须是有限实数（拒绝 bool / NaN / Infinity）；允许 <= 0，
+    因为“区间跨过相机原点”是裁定阶段的显式退化而非构造错误。
+    要求 ``z_near <= z_far``，否则抛出 :class:`InvalidParameterError`。
+    """
+    lo = _require_finite_number(
+        z_near, "depth_interval.z_near", InvalidParameterError
+    )
+    hi = _require_finite_number(
+        z_far, "depth_interval.z_far", InvalidParameterError
+    )
+    if lo > hi:
+        raise InvalidParameterError(
+            f"depth_interval requires z_near <= z_far, got [{lo}, {hi}]"
+        )
+    return lo, hi
