@@ -24,3 +24,7 @@ class InvalidPointError(VisibilityError):
 
 class InvalidParameterError(VisibilityError):
     """标量参数非法（k、容差、批次对象类型等）。"""
+
+
+class VersionMismatchError(VisibilityError):
+    """批量更新的期望版本与当前已发布版本不一致（过期版本）。"""

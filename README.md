@@ -12,7 +12,7 @@
 ## 运行命令
 
 ```bash
-# 必要测试（26 个用例）
+# 必要测试（41 个用例，含缓存局部更新回归）
 python -m unittest discover -s tests -v
 
 # 固定输入演示（真实计算，实测 < 0.1 秒，远低于约 8 秒要求）
@@ -27,6 +27,8 @@ from visibility import (
     Visibility, Reason, ViewStatus,    # 输出
     classify_view, classify_points,    # 裁定
     count_visible_views, indices_visible_in_at_least_k,  # 聚合
+    VisibilityCache, CameraDepthUpdate,  # 版本化可见性缓存
+    VersionMismatchError,              # 过期版本拒绝
 )
 ```
 
@@ -69,6 +71,47 @@ from visibility import (
    - `|cz - d| <= T` → `visible`（含边界，闭区间）
    - `cz - d > T` → `occluded`（点在表面之后）
    - `d - cz > T` → `in_front`（点在表面之前）
+
+## 版本化可见性缓存（局部更新）
+
+`VisibilityCache(views, points, k, abs_tol=1e-6, rel_tol=1e-6)` 在构造时
+**固定**全部相机（内参/外参）、世界点、容差与 `k`，并从头按原公式
+全量计算一次；之后只允许通过批量替换某相机的深度值或禁用 mask 来
+推进版本，相机与点本身不可变。
+
+```python
+cache = VisibilityCache(views, points, k=2)
+cache.status(pi, vi)        # 当前版本中 (点, 相机) 的 ViewStatus
+cache.visible_count(pi)     # 该点 visible 视图数
+cache.selected()            # 可见数 >= k 的点下标（升序）
+cache.version               # 当前已发布版本（构造后为 0）
+cache.last_recomputed       # 最近一次更新实际重算的 (点, 相机) 对
+
+new_version = cache.update(
+    [CameraDepthUpdate(camera_index=0, values=new_values),
+     CameraDepthUpdate(camera_index=2, disabled=new_mask)],
+    expected_version=cache.version,
+)
+```
+
+- **反向依赖**：构造时建立“像素 -> 实际查询该像素四邻域的 (点, 相机)
+  对”的映射。相机后方与投影出界的查询不登记任何像素；stencil 越界
+  方向上的不存在像素也不登记，但**因像素被禁用/缺邻域而为 unknown
+  的查询同样登记其四邻域中真实存在的像素**，像素恢复有效后会被
+  正常重算。相机与点固定，依赖关系构造后不变。
+- **局部重算**：`update` 只对新旧深度/mask 实际不同的像素，沿反向
+  依赖重算受影响的 (点, 相机) 对，并增量维护每点可见计数与入选
+  集合；`last_recomputed` 暴露本次重算清单，供核对局部性。
+- **版本与原子性**：`expected_version` 必须等于当前版本，否则抛
+  `VersionMismatchError`；同一批中同一相机只允许出现一次。每次
+  `update` 先整体校验全部相机下标、形状（像素坐标隐含于形状）、
+  数值与版本，全部通过后才原子发布——校验失败时旧快照保持可查询，
+  不留下半份计数，也绝不通过清空全部缓存来掩盖漏依赖。
+- `CameraDepthUpdate(camera_index, values=None, disabled=None)`：
+  `values` / `disabled` 均为**完整替换**（不是增量补丁），至少给
+  一个；校验规则与 `DepthMap` 完全一致（1..32 x 1..32、有限正数、
+  mask 为同形 bool）。
+- 不引入区间深度、不接入在线摄像头；四点齐全才插值的规则不变。
 
 ## 输入上限与错误语义
 
@@ -121,5 +164,10 @@ from visibility import (
 - `tests/reference.py`：**独立参考实现**，不导入被测核心；测试用它
   交叉核对，另以手工常量作为期望值主来源，投影↔逆投影的往返一致
   仅作补充检查。
-- `demo.py`：固定确定性输入，真实计算并打印全部状态类别及一次实际
-  触发的输入拒绝（NaN）；无 sleep、无预录结果。
+- `tests/test_cache.py`：缓存局部更新——相邻点共享像素、unknown
+  转 visible、mask 禁用又恢复、多相机同批更新、过期版本与原子性；
+  每次变更后用 `classify_points` 从头全算作参考逐对比较，并以
+  `last_recomputed` 核对重算局部性。
+- `demo.py`：固定确定性输入，真实计算并打印全部状态类别、一次实际
+  触发的输入拒绝（NaN）、缓存局部更新正常路径与一次实际触发的
+  过期版本拒绝；无 sleep、无预录结果。

@@ -14,11 +14,14 @@ from __future__ import annotations
 
 from visibility import (
     Camera,
+    CameraDepthUpdate,
     DepthMap,
     InvalidPointError,
     Reason,
+    VersionMismatchError,
     View,
     Visibility,
+    VisibilityCache,
     classify_points,
     classify_view,
     indices_visible_in_at_least_k,
@@ -110,6 +113,62 @@ def main() -> None:
         print(f"实际捕获 {type(exc).__name__}: {exc}")
     else:
         raise AssertionError("NaN 输入应当被拒绝")
+
+    # --- 版本化可见性缓存：局部更新只重算受影响对 --------------------
+    print("\n== 可见性缓存：批量替换深度/mask，只重算受影响 (点, 相机) 对 ==")
+    cache_points = [P for _, P in probes]
+    cache = VisibilityCache(views, cache_points, k=2)
+    print(f"构造后 version={cache.version} 入选集(k=2)={cache.selected()}")
+
+    # 正常路径：把视图 0 的像素 (row=2,col=2) 深度改大到 100，
+    # 只有 stencil 覆盖该像素的点（探针 0/1/2/5 投在 (2.5,2.5) 附近）被重算。
+    new_plane = [row[:] for row in plane]
+    new_plane[2][2] = 100.0
+    ver = cache.update(
+        [CameraDepthUpdate(0, values=new_plane)], expected_version=0
+    )
+    print(
+        f"更新后 version={ver} 重算对={list(cache.last_recomputed)} "
+        f"(仅视图 0 中依赖像素(2,2)的点)"
+    )
+    st0 = cache.status(0, 0)
+    print(
+        f"点0@视图0 变为 {st0.visibility.value} "
+        f"(projected_z={st0.projected_z:.1f}, sampled={st0.sampled_depth:.2f})"
+    )
+    print(f"点0 可见计数={cache.visible_count(0)} 入选集={cache.selected()}")
+
+    # mask 禁用再恢复：禁用视图 1 的 (2,2)，点0 变 unknown；恢复后回到 visible。
+    m1 = [[False for _ in range(W)] for _ in range(H)]
+    m1[2][2] = True
+    cache.update([CameraDepthUpdate(1, disabled=m1)], expected_version=1)
+    print(
+        f"禁用视图1像素(2,2)后 点0@视图1={cache.status(0, 1).visibility.value}"
+        f"/{cache.status(0, 1).reason.value} 计数={cache.visible_count(0)}"
+    )
+    cache.update(
+        [CameraDepthUpdate(1, disabled=[[False] * W for _ in range(H)])],
+        expected_version=2,
+    )
+    print(
+        f"恢复后 点0@视图1={cache.status(0, 1).visibility.value} "
+        f"计数={cache.visible_count(0)} 入选集={cache.selected()}"
+    )
+
+    # 实际边界：过期版本必须被拒绝，且旧快照保持可查询。
+    print("\n== 缓存边界：过期版本拒绝（原子性，不留半份计数） ==")
+    try:
+        cache.update(
+            [CameraDepthUpdate(0, values=plane)], expected_version=1
+        )
+    except VersionMismatchError as exc:
+        print(f"实际捕获 {type(exc).__name__}: {exc}")
+    else:
+        raise AssertionError("过期版本应当被拒绝")
+    print(
+        f"拒绝后 version 仍为 {cache.version}，"
+        f"点0@视图1 仍为 {cache.status(0, 1).visibility.value}"
+    )
 
     print("\n演示正常结束。")
 

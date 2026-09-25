@@ -9,6 +9,7 @@ from .errors import (
     InvalidDepthMapError,
     InvalidParameterError,
     InvalidPointError,
+    VersionMismatchError,
     VisibilityError,
 )
 from .types import Camera, DepthMap, Reason, View, ViewStatus, Visibility
@@ -21,6 +22,7 @@ from .core import (
     indices_visible_in_at_least_k,
 )
 from .types import MAX_DEPTH_HEIGHT, MAX_DEPTH_WIDTH
+from .cache import CameraDepthUpdate, VisibilityCache
 
 __all__ = [
     "Camera",
