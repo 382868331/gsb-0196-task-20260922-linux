@@ -14,11 +14,15 @@ from __future__ import annotations
 
 from visibility import (
     Camera,
+    DepthUpdate,
+    MaskUpdate,
+    StaleVersionError,
     DepthMap,
     InvalidPointError,
     Reason,
     View,
     Visibility,
+    VisibilityCache,
     classify_points,
     classify_view,
     indices_visible_in_at_least_k,
@@ -110,6 +114,44 @@ def main() -> None:
         print(f"实际捕获 {type(exc).__name__}: {exc}")
     else:
         raise AssertionError("NaN 输入应当被拒绝")
+
+    # --- 增量可见性缓存：正常路径 + 过期版本边界 ------------------------
+    print("\n== 版本化增量缓存（局部重算，不清空全缓存） ==")
+    cache = VisibilityCache(
+        [cam] * 3, [View(cam, DepthMap(plane)).depth_map,
+                    View(cam, DepthMap([r[:] for r in plane])).depth_map,
+                    View(cam, DepthMap(plane, mask)).depth_map],
+        points, k=2,
+    )
+    snap0 = cache.snapshot()
+    print(f"初始各相机版本 = {cache.versions}，入选点 = {cache.selected_indices()}")
+    # 视图2 的 (3,3) 禁用导致点5 masked/unknown；同批恢复它，并改视图0 深度。
+    deeper = [row[:] for row in plane]
+    # 改一个没有任何固定点依赖的像素：版本照推进，但不触发重算，
+    # 直接体现“只重算受影响对”而不是清空全缓存。
+    deeper[0][0] = SURFACE_Z + 2.0
+    report = cache.apply_updates([
+        MaskUpdate(view_index=2, pixels=[(3, 3, True)], expected_version=0),
+        DepthUpdate(view_index=0,
+                    depth_map=DepthMap(deeper), expected_version=0),
+    ])
+    print(f"发布后版本 = {report.versions}")
+    print(f"实际重算的 (点,相机) 对 = {sorted(report.recomputed)}")
+    print("（只含受影响对；相机后/出界点不在其中，未受影响状态对象不变）")
+    print("点5 在视图2: "
+          f"{snap0.status(5, 2).reason.value} -> "
+          f"{cache.status(5, 2).visibility.value}")
+    print(f"旧快照仍可查：snap0 点5可见数 = {snap0.visible_count(5)}，"
+          f"当前 = {cache.visible_count(5)}")
+
+    print("\n-- 边界：携带过期版本必须原子拒绝 --")
+    try:
+        cache.apply_updates([MaskUpdate(0, [(0, 0, False)], expected_version=0)])
+    except StaleVersionError as exc:
+        print(f"实际捕获 {type(exc).__name__}: {exc}")
+    else:
+        raise AssertionError("过期版本更新应当被拒绝")
+    print(f"拒绝后版本与入选集不变: {cache.versions}, {cache.selected_indices()}")
 
     print("\n演示正常结束。")
 

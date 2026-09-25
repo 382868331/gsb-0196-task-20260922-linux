@@ -24,3 +24,11 @@ class InvalidPointError(VisibilityError):
 
 class InvalidParameterError(VisibilityError):
     """标量参数非法（k、容差、批次对象类型等）。"""
+
+
+class InvalidUpdateError(VisibilityError):
+    """增量更新批次非法（操作类型、重复相机、像素坐标等）。"""
+
+
+class StaleVersionError(VisibilityError):
+    """更新携带的 expected_version 与相机当前版本不一致（过期/超前）。"""

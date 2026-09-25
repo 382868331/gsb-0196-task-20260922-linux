@@ -9,6 +9,8 @@ from .errors import (
     InvalidDepthMapError,
     InvalidParameterError,
     InvalidPointError,
+    InvalidUpdateError,
+    StaleVersionError,
     VisibilityError,
 )
 from .types import Camera, DepthMap, Reason, View, ViewStatus, Visibility
@@ -19,6 +21,13 @@ from .core import (
     classify_view,
     count_visible_views,
     indices_visible_in_at_least_k,
+)
+from .cache import (
+    DepthUpdate,
+    MaskUpdate,
+    UpdateReport,
+    VisibilityCache,
+    VisibilitySnapshot,
 )
 from .types import MAX_DEPTH_HEIGHT, MAX_DEPTH_WIDTH
 
@@ -34,10 +43,17 @@ __all__ = [
     "InvalidDepthMapError",
     "InvalidPointError",
     "InvalidParameterError",
+    "InvalidUpdateError",
+    "StaleVersionError",
     "classify_view",
     "classify_points",
     "count_visible_views",
     "indices_visible_in_at_least_k",
+    "VisibilityCache",
+    "VisibilitySnapshot",
+    "DepthUpdate",
+    "MaskUpdate",
+    "UpdateReport",
     "DEFAULT_ABS_TOL",
     "DEFAULT_REL_TOL",
     "MAX_DEPTH_WIDTH",

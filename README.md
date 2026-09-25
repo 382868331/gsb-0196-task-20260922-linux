@@ -12,10 +12,10 @@
 ## 运行命令
 
 ```bash
-# 必要测试（26 个用例）
+# 必要测试（40 个用例：原回归 + 增量缓存）
 python -m unittest discover -s tests -v
 
-# 固定输入演示（真实计算，实测 < 0.1 秒，远低于约 8 秒要求）
+# 固定输入演示（真实计算，实测 < 0.1 秒，远低于约 90 秒要求）
 python demo.py
 ```
 
@@ -50,6 +50,54 @@ from visibility import (
 - `indices_visible_in_at_least_k(results, k) -> list[int]`：只计
   `visible`，返回可见视图数 `>= k` 的点下标。**不做多数票**，
   `occluded` 永远不会被其他视图翻转为 `visible`。
+
+## 版本化增量缓存（VisibilityCache）
+
+固定相机集合、世界点集合与 `k` 后，可用缓存避免每次更新都全量重算：
+
+```python
+from visibility import (
+    VisibilityCache, DepthUpdate, MaskUpdate,
+)
+
+cache = VisibilityCache(cameras, depth_maps, points, k=2,
+                        abs_tol=1e-6, rel_tol=1e-6)
+cache.status(point_index, view_index)      # ViewStatus（实时）
+cache.visible_count(point_index)           # 该点可见相机数
+cache.selected_indices()                   # 可见数 >= k 的点下标
+snap = cache.snapshot()                    # 不可变快照
+snap.status(point_index, view_index)       # 旧快照在更新后仍可查询
+
+# 批量更新：每相机至多一个操作，携带 expected_version
+report = cache.apply_updates([
+    DepthUpdate(view_index=0, depth_map=new_dm, expected_version=0),
+    MaskUpdate(view_index=1, pixels=[(row, col, enabled), ...],
+               expected_version=0),
+])
+report.recomputed    # frozenset[(point_index, view_index)]，实际重算对
+report.versions      # 发布后各相机版本
+report.changed_pixels  # 每相机实际取值/mask 发生变化的像素
+```
+
+- `DepthUpdate`：整体替换某相机深度图（含 mask），新图尺寸必须与原图
+  一致（相机/点固定，不改变 32×32 上限与矩形性约束）。
+- `MaskUpdate`：批量修改像素启用状态；`(r, c, False)` 禁用、
+  `(r, c, True)` 恢复；同一批内同一像素只能出现一次，坐标必须在界内。
+- 版本：每相机独立整数版本，初值 0；每次成功的更新操作都使该相机
+  版本 +1。`expected_version` 与当前版本不符（过期或超前）抛
+  `StaleVersionError`。
+- 原子性：一次 `apply_updates` 先在旧状态上验证**全部**操作的类型、
+  坐标、版本与数值，再构造新数据、重算、一次性发布；任一校验失败时
+  深度图、状态、每点可见计数与入选集合都保持原样，不留半份结果。
+- 局部性：缓存为每个像素维护“实际查询它的 (点, 相机)”反向依赖。
+  更新时只重算变化像素反向依赖命中的点相机对；`report.recomputed`
+  暴露该集合供核对。实现**不会**清空全部缓存掩盖漏依赖。
+- 依赖登记规则（与裁定顺序一致）：相机后方（`cz <= 0`）不投影、
+  不登记；投影整体出界不登记不存在的像素；stencil 落在最后一行/列时
+  只登记界内实际存在的角点；**因像素被 mask 禁用而 unknown 的查询也
+  登记四个角点**，因此像素恢复有效后该对会被重算（unknown → visible）。
+- 新增错误：`InvalidUpdateError`（操作/坐标/形状非法、同相机多操作）、
+  `StaleVersionError`（版本不符），均继承 `VisibilityError`。
 
 `ViewStatus` 字段：`view_index`、`visibility`、`reason`、
 `projected_z`、`sampled_depth`、`u`、`v`。
