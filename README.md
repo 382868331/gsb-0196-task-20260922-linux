@@ -12,11 +12,19 @@
 ## 运行命令
 
 ```bash
-# 必要测试（26 个用例）
+# 准备（可选）：仓库自带 .venv；自建则
+#   python3.14 -m venv .venv
+# 无第三方依赖，无需 pip install。
+
+# 必要测试（41 个用例）
 python -m unittest discover -s tests -v
 
 # 固定输入演示（真实计算，实测 < 0.1 秒，远低于约 8 秒要求）
 python demo.py
+
+# 本轮演示：纹理相机选择前后账本对照（真实计算，实测 < 0.1 秒，
+# 远低于 90 秒要求；无 sleep、无预录输出）
+python demo_iteration.py
 ```
 
 ## 接口与数据结构
@@ -114,6 +122,42 @@ from visibility import (
 - 批量规模按 Python 列表/元组传入；32×32 是单图边界，库不额外限制
   视图数或点数，但演示不穷举上限规模。
 
+## 纹理相机选择（visibility.selection）
+
+在可见性结果之上，为一条或一棵树状的相邻面集合选择纹理相机：
+每个面有候选视图及数据代价，相邻面选了不同相机要支付接缝代价，
+目标是最小化"数据代价 + 接缝代价"总成本；不可见视图不能选。
+邻接关系必须是**树**（n 面 n-1 边且连通），用树 DP 求**精确**最优解。
+
+```python
+from visibility import (
+    CandidateView, FaceCandidates, SeamEdge,   # 输入
+    SelectionResult, DataLedgerEntry, SeamLedgerEntry,  # 输出
+    select_cameras,
+    MAX_FACES, MAX_CANDIDATES_PER_FACE,        # 64 / 8
+)
+
+result = select_cameras(faces, edges)
+result.camera_vector   # 按面 ID 升序的所选相机编号
+result.data_ledger     # 每面 (face_id, view_id, data_cost)，按面 ID 升序
+result.seam_ledger     # 每边 (face_a, face_b, view_a, view_b, cost)，按输入边顺序
+result.total_cost      # = total_data_cost + total_seam_cost
+```
+
+- `CandidateView(view_id, data_cost, visible)`：`view_id` 为非负
+  整数；`data_cost` 有限且 >= 0；`visible=False` 的候选不可选。
+- `FaceCandidates(face_id, candidates)`：每面 1..8 个候选，`face_id`
+  非负整数且全局唯一。
+- `SeamEdge(face_a, face_b, cost)`：两端选了不同相机时支付 `cost`
+  （有限且 >= 0）；相同则该边接缝项为 0。
+- 某面没有任何可见候选时抛出 `InfeasibleSelectionError`，错误信息
+  指明具体面 ID，**不伪造默认相机**。
+- 输入非法（非树、超上限、重复面 ID、NaN/负代价、bool 整数等）抛出
+  `InvalidSelectionError`；两者均继承 `VisibilityError`。
+- 平局确定性：根固定为面 ID 最小者，并列时保留候选列表中靠前者。
+- 限制：只处理树状邻接（一般图/环不在本接口内）；最多 64 面、
+  每面 8 候选是接口边界；不生成网页或真实相机数据。
+
 ## 测试与独立性说明
 
 - `tests/test_visibility.py`：像素中心手算常量、容差边界、遮挡边缘、
@@ -121,5 +165,11 @@ from visibility import (
 - `tests/reference.py`：**独立参考实现**，不导入被测核心；测试用它
   交叉核对，另以手工常量作为期望值主来源，投影↔逆投影的往返一致
   仅作补充检查。
+- `tests/test_selection.py`：树 DP 选择的手工常量用例（含"每面单独
+  最优却接缝很多"的反例：贪心合计 11，全局最优 4）、文件内暴力枚举
+  参考实现对多棵小树全枚举交叉核对、账本自洽性与输入校验。
 - `demo.py`：固定确定性输入，真实计算并打印全部状态类别及一次实际
   触发的输入拒绝（NaN）；无 sleep、无预录结果。
+- `demo_iteration.py`：用 visibility 核心裁定一棵 5 面树的候选可见性，
+  打印"每面单独最优"与"树 DP 全局最优"两份数据/接缝账本及总成本，
+  并实际触发一次"某面无可见候选"的拒绝；无 sleep、无预录结果。

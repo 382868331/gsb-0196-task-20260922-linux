@@ -5,10 +5,12 @@
 """
 
 from .errors import (
+    InfeasibleSelectionError,
     InvalidCameraError,
     InvalidDepthMapError,
     InvalidParameterError,
     InvalidPointError,
+    InvalidSelectionError,
     VisibilityError,
 )
 from .types import Camera, DepthMap, Reason, View, ViewStatus, Visibility
@@ -21,6 +23,17 @@ from .core import (
     indices_visible_in_at_least_k,
 )
 from .types import MAX_DEPTH_HEIGHT, MAX_DEPTH_WIDTH
+from .selection import (
+    MAX_CANDIDATES_PER_FACE,
+    MAX_FACES,
+    CandidateView,
+    DataLedgerEntry,
+    FaceCandidates,
+    SeamEdge,
+    SeamLedgerEntry,
+    SelectionResult,
+    select_cameras,
+)
 
 __all__ = [
     "Camera",
@@ -42,4 +55,15 @@ __all__ = [
     "DEFAULT_REL_TOL",
     "MAX_DEPTH_WIDTH",
     "MAX_DEPTH_HEIGHT",
+    "CandidateView",
+    "FaceCandidates",
+    "SeamEdge",
+    "SelectionResult",
+    "DataLedgerEntry",
+    "SeamLedgerEntry",
+    "select_cameras",
+    "MAX_FACES",
+    "MAX_CANDIDATES_PER_FACE",
+    "InvalidSelectionError",
+    "InfeasibleSelectionError",
 ]

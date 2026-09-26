@@ -24,3 +24,11 @@ class InvalidPointError(VisibilityError):
 
 class InvalidParameterError(VisibilityError):
     """标量参数非法（k、容差、批次对象类型等）。"""
+
+
+class InvalidSelectionError(VisibilityError):
+    """纹理相机选择输入非法（面/候选/边结构、代价有限性等）。"""
+
+
+class InfeasibleSelectionError(VisibilityError):
+    """某个面没有任何可见候选视图，无法为其选择纹理相机。"""
