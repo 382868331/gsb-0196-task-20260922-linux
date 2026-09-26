@@ -7,8 +7,10 @@
 from .errors import (
     InvalidCameraError,
     InvalidDepthMapError,
+    InvalidFaceSetError,
     InvalidParameterError,
     InvalidPointError,
+    NoVisibleCandidateError,
     VisibilityError,
 )
 from .types import Camera, DepthMap, Reason, View, ViewStatus, Visibility
@@ -21,6 +23,15 @@ from .core import (
     indices_visible_in_at_least_k,
 )
 from .types import MAX_DEPTH_HEIGHT, MAX_DEPTH_WIDTH
+from .texture import (
+    MAX_CANDIDATES_PER_FACE,
+    MAX_FACES,
+    FaceCandidate,
+    FaceChoices,
+    SeamChoice,
+    TextureSelection,
+    select_texture_cameras,
+)
 
 __all__ = [
     "Camera",
@@ -34,6 +45,8 @@ __all__ = [
     "InvalidDepthMapError",
     "InvalidPointError",
     "InvalidParameterError",
+    "InvalidFaceSetError",
+    "NoVisibleCandidateError",
     "classify_view",
     "classify_points",
     "count_visible_views",
@@ -42,4 +55,11 @@ __all__ = [
     "DEFAULT_REL_TOL",
     "MAX_DEPTH_WIDTH",
     "MAX_DEPTH_HEIGHT",
+    "FaceCandidate",
+    "FaceChoices",
+    "SeamChoice",
+    "TextureSelection",
+    "select_texture_cameras",
+    "MAX_FACES",
+    "MAX_CANDIDATES_PER_FACE",
 ]

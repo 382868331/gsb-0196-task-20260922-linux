@@ -1,9 +1,15 @@
-# 深度遮挡的多视图可见性裁定（visibility）
+# 多视图可见性裁定与树状纹理相机选择（visibility）
 
-离线视觉重建用的可复用小库：已知针孔相机、世界点与每相机深度图，
-按“深度为相机 z、四邻域双线性、严格 unknown 语义”裁定每个世界点
-在每个视图下是 **visible / occluded / in_front / unknown**，并聚合
-出至少在 k 个视图中可见的点集。
+离线视觉重建用的可复用小库，含两个部分：
+
+1. **可见性裁定**：已知针孔相机、世界点与每相机深度图，按“深度为
+   相机 z、四邻域双线性、严格 unknown 语义”裁定每个世界点在每个视图
+   下是 **visible / occluded / in_front / unknown**，并聚合出至少在
+   k 个视图中可见的点集。
+2. **纹理相机选择（本轮新增）**：利用已有可见性结果，为树状邻接的
+   面集合（最多 64 面、每面最多 8 候选）用树 DP 精确最小化
+   “数据代价之和 + 相邻面换相机的接缝代价之和”，返回每面视图与
+   数据/接缝账本；无可见候选的面被点名拒绝，不伪造默认相机。
 
 - Python：**3.14.7**（仅用标准库：`math`、`dataclasses`、`enum`、`unittest` 等）
 - 依赖：**无第三方依赖**，装好 Python 即可运行；不联网、不需要账号或密钥
@@ -12,11 +18,18 @@
 ## 运行命令
 
 ```bash
-# 必要测试（26 个用例）
+# 准备 venv（Linux 原生 Python 3.14.7，仅标准库，无第三方依赖）
+python3.14 -m venv .venv
+source .venv/bin/activate
+
+# 全部测试（可见性 26 个 + 纹理选择 15 个，共 41 个用例）
 python -m unittest discover -s tests -v
 
 # 固定输入演示（真实计算，实测 < 0.1 秒，远低于约 8 秒要求）
 python demo.py
+
+# 纹理相机选择演示（贪心 vs 树DP 账本对比 + 无可见候选边界，<0.1 秒）
+python demo_iteration.py
 ```
 
 ## 接口与数据结构
@@ -53,6 +66,48 @@ from visibility import (
 
 `ViewStatus` 字段：`view_index`、`visibility`、`reason`、
 `projected_z`、`sampled_depth`、`u`、`v`。
+
+## 纹理相机选择（树 DP）
+
+```python
+from visibility import (
+    FaceCandidate,          # (ViewStatus, data_cost)
+    select_texture_cameras, # 精确树 DP 选择
+    TextureSelection,       # 结果：faces / seams / total_cost / camera_vector
+    FaceChoices, SeamChoice,
+    InvalidFaceSetError, NoVisibleCandidateError,
+)
+```
+
+- 输入：
+  - `faces`：`(face_id, [FaceCandidate(...), ...])` 序列，1..64 个面、
+    每面 1..8 个候选。`face_id` 为非负整数（拒绝 bool、拒绝重复），
+    候选顺序无关（按 `view_index` 去重与并列裁决）。
+  - `FaceCandidate(status, data_cost)`：`status` 必须是
+    `classify_view/classify_points` 产出的 `ViewStatus`；只有
+    `visibility == VISIBLE` 的候选可选，其余一律忽略。
+    `data_cost` 为有限非负数。
+  - `edges`：`(face_a, face_b, seam_cost)` 序列，必须构成**一棵树**
+    （n 面恰 n-1 条边、连通、无环、无自环、无重复边、端点存在）；
+    `seam_cost` 为有限非负数，两端相机不同时支付。
+- 算法：树形动态规划（迭代后序遍历），状态
+  `dp[面][候选] = 数据代价 + Σ子树 min(dp[子][候选] + 接缝)`，
+  复杂度 O(n·k²)，给出**精确全局最优**；并列时取 `view_index` 较小者，
+  结果确定。
+- 输出 `TextureSelection`：
+  - `faces`：按面 ID 升序的 `FaceChoices(face_id, view_index, data_cost)`，
+    即每面数据项账本；
+  - `seams`：按 (小面ID, 大面ID) 升序的
+    `SeamChoice(face_a, face_b, view_a, view_b, cost)`，即接缝项账本
+    （两端同相机时 `cost == 0`）；
+  - `camera_vector`：按面 ID 升序的每面所选相机下标元组；
+  - `total_cost == Σ 数据项 + Σ 接缝项`。
+- 边界与错误：
+  - 某面没有任何**可见**候选时抛 `NoVisibleCandidateError`，异常对象的
+    `face_id` 字段点名具体面（结构全部校验通过后按 ID 升序报第一个），
+    **不伪造默认相机**；
+  - 面数/候选数超限、代价为负或 NaN、ID 重复、边不构成树等抛
+    `InvalidFaceSetError`，信息携带 `faces[i]/edges[i]` 下标路径。
 
 ## 裁定规则（顺序即契约）
 
@@ -118,8 +173,18 @@ from visibility import (
 
 - `tests/test_visibility.py`：像素中心手算常量、容差边界、遮挡边缘、
   相机后点、缺邻域、mask 禁用、多视图聚合与输入校验。
+- `tests/test_texture.py`：树 DP 的独立对照测试——`brute_force_best`
+  不导入被测核心，对小树（链/分支树）枚举所有可见候选组合取最小总成本，
+  与 `select_texture_cameras` 的结果、相机向量和账本交叉核对；
+  另含“每面单独最优却接缝更多”的反例（贪心 1.1 > 全局 1.0）、
+  不可见候选绝不被选、无可见候选点名报错、环/不连通/超限/类型拒绝等。
 - `tests/reference.py`：**独立参考实现**，不导入被测核心；测试用它
   交叉核对，另以手工常量作为期望值主来源，投影↔逆投影的往返一致
   仅作补充检查。
 - `demo.py`：固定确定性输入，真实计算并打印全部状态类别及一次实际
   触发的输入拒绝（NaN）；无 sleep、无预录结果。
+- `demo_iteration.py`：先用 `classify_points` 真实裁定 4 相机 x 6
+  面的可见性，再打印“选择前（逐面贪心）”与“选择后（树 DP 最优）”
+  的数据/接缝账本与相机向量，最后演示一个在所有视图中不可见的面被
+  `NoVisibleCandidateError` 点名拒绝；实测 < 0.1 秒（要求 < 90 秒）。
+  不生成网页、不使用真实相机数据，全部为仓库内确定性合成输入。

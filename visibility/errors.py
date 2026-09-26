@@ -24,3 +24,18 @@ class InvalidPointError(VisibilityError):
 
 class InvalidParameterError(VisibilityError):
     """标量参数非法（k、容差、批次对象类型等）。"""
+
+
+class InvalidFaceSetError(VisibilityError):
+    """面集合/邻接结构非法（ID 重复、边不成树、代价非法等）。"""
+
+
+class NoVisibleCandidateError(VisibilityError):
+    """某个面没有任何可见候选视图；报告具体面，不伪造默认相机。"""
+
+    def __init__(self, face_id: int) -> None:
+        self.face_id = face_id
+        super().__init__(
+            f"face {face_id} has no visible candidate view; "
+            "cannot select a texture camera for it"
+        )
