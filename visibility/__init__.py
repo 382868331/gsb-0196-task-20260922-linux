@@ -11,7 +11,16 @@ from .errors import (
     InvalidPointError,
     VisibilityError,
 )
-from .types import Camera, DepthMap, Reason, View, ViewStatus, Visibility
+from .types import (
+    Camera,
+    CameraModel,
+    DepthMap,
+    OrthographicCamera,
+    Reason,
+    View,
+    ViewStatus,
+    Visibility,
+)
 from .core import (
     DEFAULT_ABS_TOL,
     DEFAULT_REL_TOL,
@@ -24,6 +33,8 @@ from .types import MAX_DEPTH_HEIGHT, MAX_DEPTH_WIDTH
 
 __all__ = [
     "Camera",
+    "OrthographicCamera",
+    "CameraModel",
     "DepthMap",
     "View",
     "ViewStatus",

@@ -1,7 +1,8 @@
 """独立参考实现（仅测试使用）。
 
 本模块**不导入** ``visibility`` 包的任何内容，用独立写法重新实现
-针孔投影、四邻域双线性采样与容差裁定，供测试交叉核对。
+透视/正交投影、四邻域双线性采样与容差裁定，供测试交叉核对。
+``model`` 取 ``"perspective"``（默认）或 ``"orthographic"``。
 期望值的主要来源仍是测试中手工推算的常量；本参考与被测实现
 互为对照，任何共用的概念性错误通过“像素中心手算用例”兜底。
 """
@@ -18,24 +19,33 @@ def transform(R, t, P):
         R[1][0] * P[0] + R[1][1] * P[1] + R[1][2] * P[2] + t[1],
         R[2][0] * P[0] + R[2][1] * P[1] + R[2][2] * P[2] + t[2],
     )
-
-
-def project(K, R, t, P):
+def project(K, R, t, P, model="perspective"):
     """返回 (u, v, z)；z<=0 时只返回 z（第三分量），u/v 为 None。"""
     x, y, z = transform(R, t, P)
     if z <= 0.0:
         return None, None, z
-    qx, qy = x / z, y / z
-    u = K[0][0] * qx + K[0][1] * qy + K[0][2]
-    v = K[1][1] * qy + K[1][2]
+    if model == "orthographic":
+        # 正交：不做透视除法，K 直接作用于相机 x/y。
+        u = K[0][0] * x + K[0][1] * y + K[0][2]
+        v = K[1][1] * y + K[1][2]
+    else:
+        qx, qy = x / z, y / z
+        u = K[0][0] * qx + K[0][1] * qy + K[0][2]
+        v = K[1][1] * qy + K[1][2]
     return u, v, z
 
 
-def world_point_at_pixel(K, R, t, u, v, z):
+def world_point_at_pixel(K, R, t, u, v, z, model="perspective"):
     """逆投影：给定像素 (u,v) 与相机 z，反解世界点 P = R^T(q - t)。"""
-    qx = (u - K[0][2] - K[0][1] * (v - K[1][2]) / K[1][1]) / K[0][0]
-    qy = (v - K[1][2]) / K[1][1]
-    q = (qx * z, qy * z, z)
+    ny = v - K[1][2]
+    if model == "orthographic":
+        qy = ny / K[1][1]
+        qx = (u - K[0][2] - K[0][1] * qy) / K[0][0]
+        q = (qx, qy, z)
+    else:
+        qx = (u - K[0][2] - K[0][1] * ny / K[1][1]) / K[0][0]
+        qy = ny / K[1][1]
+        q = (qx * z, qy * z, z)
     # P = R^T (q - t)
     d = (q[0] - t[0], q[1] - t[1], q[2] - t[2])
     return (
@@ -66,9 +76,10 @@ def sample(values, disabled, u, v):
     ), "ok"
 
 
-def classify(K, R, t, values, disabled, P, abs_tol, rel_tol):
+def classify(K, R, t, values, disabled, P, abs_tol, rel_tol,
+             model="perspective"):
     """完整参考裁定，返回字典。"""
-    u, v, z = project(K, R, t, P)
+    u, v, z = project(K, R, t, P, model)
     if u is None:
         return {"visibility": "unknown", "reason": "behind_camera",
                 "u": None, "v": None, "z": z, "depth": None}

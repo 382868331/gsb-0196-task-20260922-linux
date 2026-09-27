@@ -21,12 +21,14 @@ from tests import reference as ref  # noqa: E402
 
 from visibility import (  # noqa: E402
     Camera,
+    CameraModel,
     DepthMap,
     InvalidCameraError,
     InvalidDepthMapError,
     InvalidParameterError,
     InvalidPointError,
     Reason,
+    OrthographicCamera,
     View,
     Visibility,
     classify_points,
@@ -400,6 +402,132 @@ class BoundarySizeTests(unittest.TestCase):
         # 投影在 (0,0) 像素中心：缺行/列 1？列1存在（宽32），有效。
         st = classify_view(view, (0.0, 0.0, 3.0), abs_tol=0.0, rel_tol=0.0)
         self.assertEqual(st.visibility, Visibility.VISIBLE)
+
+
+class OrthographicCameraTests(unittest.TestCase):
+    """正交相机：投影不除 z；深度语义与 unknown 规则与透视一致。"""
+
+    # 正交内参：fx=fy=2 像素/世界单位，主点 (1,1)，即 u=2*cx+1, v=2*cy+1。
+    KO = ((2.0, 0.0, 1.0), (0.0, 2.0, 1.0), (0.0, 0.0, 1.0))
+
+    def _view(self, w=4, h=4, d=5.0, mask=None):
+        cam = OrthographicCamera(K=self.KO, R=IDENT, t=ZERO)
+        vals = [[d for _ in range(w)] for _ in range(h)]
+        return View(cam, DepthMap(vals, mask))
+
+    def test_projection_has_no_perspective_divide(self):
+        # 同一相机 xy=(0.75, 0.25) 在任意深度都投到像素 (2.5, 1.5)。
+        view = self._view()
+        for z in (1.0, 5.0, 50.0):
+            st = classify_view(view, (0.75, 0.25, z),
+                               abs_tol=0.0, rel_tol=0.0)
+            self.assertEqual((st.u, st.v), (2.5, 1.5), msg=f"z={z}")
+        # z=5 恰在表面 -> visible；z=1/50 与深度无关，只做深度比较。
+        self.assertEqual(
+            classify_view(view, (0.75, 0.25, 5.0)).visibility,
+            Visibility.VISIBLE,
+        )
+        self.assertEqual(
+            classify_view(view, (0.75, 0.25, 6.0)).visibility,
+            Visibility.OCCLUDED,
+        )
+        self.assertEqual(
+            classify_view(view, (0.75, 0.25, 4.0)).visibility,
+            Visibility.IN_FRONT,
+        )
+
+    def test_depth_still_camera_z(self):
+        # 平移相机：深度 cz = z_world + t_z，与透视一致。
+        cam = OrthographicCamera(K=self.KO, R=IDENT, t=(0.0, 0.0, 10.0))
+        view = View(cam, plane_depth(4, 4, 5.0))
+        st = classify_view(view, (0.75, 0.25, -5.0))  # cz = 5
+        self.assertEqual(st.projected_z, 5.0)
+        self.assertEqual(st.visibility, Visibility.VISIBLE)
+        st_behind = classify_view(view, (0.75, 0.25, -15.0))  # cz = -5
+        self.assertEqual(st_behind.visibility, Visibility.UNKNOWN)
+        self.assertEqual(st_behind.reason, Reason.BEHIND_CAMERA)
+
+    def test_boundary_and_missing_neighbor_unknown(self):
+        # cx 使 u 恰为 4（=宽）-> out_of_bounds；u=3 像素中心 -> 缺邻域。
+        view = self._view()
+        st = classify_view(view, (1.5, 0.25, 5.0), abs_tol=0.0, rel_tol=0.0)
+        self.assertEqual((st.visibility, st.reason),
+                         (Visibility.UNKNOWN, Reason.OUT_OF_BOUNDS))
+        st_edge = classify_view(view, (1.0, 1.0, 5.0),
+                                abs_tol=0.0, rel_tol=0.0)
+        self.assertEqual((st_edge.visibility, st_edge.reason),
+                         (Visibility.UNKNOWN, Reason.MISSING_NEIGHBOR))
+
+    def test_masked_pixel_unknown(self):
+        w = h = 4
+        mask = [[False for _ in range(w)] for _ in range(h)]
+        mask[2][3] = True  # 投影 (2.5,1.5) 的四邻点之一
+        view = self._view(mask=mask)
+        st = classify_view(view, (0.75, 0.25, 5.0),
+                           abs_tol=0.0, rel_tol=0.0)
+        self.assertEqual((st.visibility, st.reason),
+                         (Visibility.UNKNOWN, Reason.MASKED_PIXEL))
+
+    def test_skew_and_rotation_cross_check(self):
+        # 带斜切与旋转的正交相机：与独立参考逐点核对。
+        Ks = ((2.0, 0.5, 1.5), (0.0, 1.5, 0.5), (0.0, 0.0, 1.0))
+        a = math.radians(15.0)
+        ca, sa = math.cos(a), math.sin(a)
+        R = ((ca, 0.0, sa), (0.0, 1.0, 0.0), (-sa, 0.0, ca))
+        t = (0.2, -0.1, 0.3)
+        w = h = 8
+        vals = [[5.0 + 0.03 * c + 0.02 * r for c in range(w)] for r in range(h)]
+        mask = [[False] * w for _ in range(h)]
+        cam = OrthographicCamera(K=Ks, R=R, t=t)
+        view = View(cam, DepthMap(vals, mask))
+        for (u0, v0, z) in [(1.2, 1.3, 4.5), (3.7, 2.2, 5.5),
+                            (0.5, 0.5, 4.0), (7.0, 7.0, 6.0)]:
+            P = ref.world_point_at_pixel(Ks, R, t, u0, v0, z,
+                                         model="orthographic")
+            got = classify_view(view, P, abs_tol=0.01, rel_tol=0.01)
+            exp = ref.classify(Ks, R, t, vals, mask, P, 0.01, 0.01,
+                               model="orthographic")
+            self.assertEqual(got.visibility.value, exp["visibility"],
+                             msg=f"u={u0} v={v0} z={z}")
+            if got.u is not None:
+                self.assertAlmostEqual(got.u, u0, places=9)
+                self.assertAlmostEqual(got.v, v0, places=9)
+
+    def test_mixed_views_are_independent(self):
+        # 同一点：正交视图与透视视图各自投影、互不影响，聚合规则不变。
+        ortho = self._view(d=5.0)
+        # 透视相机：同一点 (0.5,0.5,5) -> (1,1)，表面深度 4 -> occluded。
+        persp = View(make_camera(), plane_depth(4, 4, 4.0))
+        # 第三透视视图全禁用 -> unknown。
+        mask_all = [[True] * 4 for _ in range(4)]
+        masked = View(make_camera(), DepthMap(
+            [[4.0] * 4 for _ in range(4)], mask_all))
+        P = (0.5, 0.5, 5.0)
+        results = classify_points([ortho, persp, masked], [P],
+                                  abs_tol=0.0, rel_tol=0.0)
+        states = [s.visibility for s in results[0]]
+        # 正交下 u=2*0.5+1=2, v=2；深度 5 对表面 5 -> visible。
+        self.assertEqual(states[0], Visibility.VISIBLE)
+        self.assertEqual(states[1], Visibility.OCCLUDED)
+        self.assertEqual(states[2], Visibility.UNKNOWN)
+        # 改不改相机类型都不影响其他视图：只有 1 个 visible。
+        self.assertEqual(count_visible_views(results[0]), 1)
+        self.assertEqual(indices_visible_in_at_least_k(results, 2), [])
+        self.assertEqual(indices_visible_in_at_least_k(results, 1), [0])
+
+    def test_model_field_and_invalid(self):
+        cam = Camera(K=K0, R=IDENT, t=ZERO)
+        self.assertIs(cam.model, CameraModel.PERSPECTIVE)
+        ocam = OrthographicCamera(K=K0, R=IDENT, t=ZERO)
+        self.assertIs(ocam.model, CameraModel.ORTHOGRAPHIC)
+        self.assertIsInstance(ocam, Camera)
+        # 显式构造正交相机与子类字段完全一致。
+        ocam2 = Camera(K=K0, R=IDENT, t=ZERO,
+                       model=CameraModel.ORTHOGRAPHIC)
+        self.assertEqual((ocam.K, ocam.R, ocam.t, ocam.model),
+                         (ocam2.K, ocam2.R, ocam2.t, ocam2.model))
+        with self.assertRaises(InvalidCameraError):
+            Camera(K=K0, R=IDENT, t=ZERO, model="orthographic")  # type: ignore[arg-type]
 
 
 if __name__ == "__main__":

@@ -4,6 +4,8 @@
 sleep、无预录结果）。演示数据在本文件内确定性构造：
 
 - 3 个针孔视图（8x8 深度图），第三视图含一个显式禁用像素；
+- 另加 1 个正交视图演示：同一相机 xy 在任何深度投影像素相同，
+  绝不像透视那样除以 z；
 - 6 个世界点，分别触发 visible / occluded / in_front 以及
   behind_camera / missing_neighbor / masked_pixel 三类 unknown；
 - 多视图聚合（至少 k 个视图 visible）；
@@ -14,8 +16,10 @@ from __future__ import annotations
 
 from visibility import (
     Camera,
+    CameraModel,
     DepthMap,
     InvalidPointError,
+    OrthographicCamera,
     Reason,
     View,
     Visibility,
@@ -52,13 +56,22 @@ def main() -> None:
     mask[3][3] = True
 
     cam = Camera(K=K, R=IDENT, t=ORIGIN)
+    # 正交内参：2 像素/世界单位，主点 (3.5, 3.5)，u=2*cx+3.5，不除 z。
+    KO = (
+        (2.0, 0.0, 3.5),
+        (0.0, 2.0, 3.5),
+        (0.0, 0.0, 1.0),
+    )
+    ortho_cam = OrthographicCamera(K=KO, R=IDENT, t=ORIGIN)
     views = [
         View(cam, DepthMap(plane)),
         View(cam, DepthMap([row[:] for row in plane])),
         View(cam, DepthMap(plane, mask)),
+        View(ortho_cam, DepthMap([row[:] for row in plane])),
     ]
 
     # --- 确定性构造的 6 个探针点 -------------------------------------------
+    # 正交演示点：(cx,cy)=(-0.5,-0.5) 在任意深度都投影到 (2.5,2.5)。
     probes = [
         ("表面上(visible)      ", point_at_pixel(2.5, 2.5, SURFACE_Z)),
         ("表面后(occluded)     ", point_at_pixel(2.5, 2.5, 7.5)),
@@ -66,10 +79,14 @@ def main() -> None:
         ("相机后(behind)       ", point_at_pixel(2.5, 2.5, -1.0)),
         ("右边缘缺邻域(missing)", point_at_pixel(7.0, 3.0, SURFACE_Z)),
         ("落在禁用像素(masked) ", point_at_pixel(2.5, 2.5, SURFACE_Z)),
+        ("正交投影不随深度变  ", (-0.5, -0.5, 4.5)),
     ]
 
     print("== 单点 x 单视图裁定（容差 1e-6 绝对 + 1e-6 相对） ==")
-    header = f"{'探针点':<24}" + "".join(f"{'视图'+str(i):>26}" for i in range(3))
+    n_views = len(views)
+    header = f"{'探针点':<24}" + "".join(
+        f"{('正交' if i == 3 else '透视')+str(i):>26}" for i in range(n_views)
+    )
     print(header)
     for name, P in probes:
         cells = []
@@ -97,7 +114,7 @@ def main() -> None:
             f"v{i_view}:{s.visibility.value}" for i_view, s in enumerate(row)
         )
         print(f"点{i} [{states}]")
-    for k in (1, 2, 3):
+    for k in (1, 2, 3, 4):
         chosen = indices_visible_in_at_least_k(results, k)
         print(f"k={k}: 入选点下标 = {chosen}")
     print("说明：occluded/in_front/unknown 均不计为可见，且不做跨视图投票翻转。")

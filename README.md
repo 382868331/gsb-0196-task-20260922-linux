@@ -1,6 +1,6 @@
 # 深度遮挡的多视图可见性裁定（visibility）
 
-离线视觉重建用的可复用小库：已知针孔相机、世界点与每相机深度图，
+离线视觉重建用的可复用小库：已知透视（针孔）或正交相机、世界点与每相机深度图，
 按“深度为相机 z、四邻域双线性、严格 unknown 语义”裁定每个世界点
 在每个视图下是 **visible / occluded / in_front / unknown**，并聚合
 出至少在 k 个视图中可见的点集。
@@ -12,7 +12,7 @@
 ## 运行命令
 
 ```bash
-# 必要测试（26 个用例）
+# 必要测试（34 个用例）
 python -m unittest discover -s tests -v
 
 # 固定输入演示（真实计算，实测 < 0.1 秒，远低于约 8 秒要求）
@@ -23,20 +23,29 @@ python demo.py
 
 ```python
 from visibility import (
-    Camera, DepthMap, View,            # 输入对象（不可变）
-    Visibility, Reason, ViewStatus,    # 输出
+    Camera, OrthographicCamera, CameraModel, DepthMap, View,  # 输入（不可变）
+    Visibility, Reason, ViewStatus,                          # 输出
     classify_view, classify_points,    # 裁定
     count_visible_views, indices_visible_in_at_least_k,  # 聚合
 )
 ```
 
-- `Camera(K, R, t)`：针孔相机。
+- `Camera(K, R, t, model=CameraModel.PERSPECTIVE)`：相机。
   - `K` 为 3×3 内参（行主序），`R` 为 3×3 世界→相机旋转，`t` 为 3 维平移。
   - 相机坐标 `p_cam = R @ P + t`；**深度 = 相机坐标 z 分量**。
-  - 像素（像素中心在整数坐标）：
+  - **透视（默认）**像素（像素中心在整数坐标），含透视除法：
     `u = (K00·cx + K01·cy)/cz + K02`，`v = K11·cy/cz + K12`。
+  - **正交**（`model=CameraModel.ORTHOGRAPHIC`，或直接用
+    `OrthographicCamera(K, R, t)`）**不做透视除法**：
+    `u = K00·cx + K01·cy + K02`，`v = K11·cy + K12`；此时 `K00/K11`
+    是“像素/世界单位”的正交比例尺，投影像素与深度 `cz` 无关。
+    深度含义（相机 z）、`cz > 0` 前置判定、四邻域采样与容差规则
+    与透视完全相同——绝不能把透视公式里的 `/cz` 套给正交相机。
+  - 两类视图可混合传入同一次裁定，每个视图只按自己的模型投影，
+    改变某个相机的类型不影响其他视图的结论。
   - 结构要求（按本库实现的有限子集）：`K00>0`、`K11>0`、`K10==0`、
     `K[2]==(0,0,1)`（后两者必须严格相等）；允许斜切 `K01`。
+    `model` 必须是 `CameraModel` 成员，传字符串等会抛 `InvalidCameraError`。
 - `DepthMap(values, disabled=None)`：行主序二维深度图，
   `values[row][col]` 为该像素表面的相机 z（必须 > 0 且有限）。
   `disabled[row][col]` 为 `True` 表示该像素显式禁用；缺省为全 False。
@@ -58,8 +67,10 @@ from visibility import (
 
 1. 计算相机坐标，**先判 `cz > 0`**：`cz <= 0` → `unknown/behind_camera`，
    不继续投影。
-2. 投影到像素 `(u, v)`；落在图覆盖范围之外（`u<0 或 v<0 或 u>=宽 或 v>=高`）
-   → `unknown/out_of_bounds`。
+2. 按相机模型投影到像素 `(u, v)`：透视除以 `cz`，正交不除；
+   落在图覆盖范围之外（`u<0 或 v<0 或 u>=宽 或 v>=高`）
+   → `unknown/out_of_bounds`。投影恰在边界、邻域缺失或被禁用时
+   继续保留 unknown（第 3、4 步），两类相机完全一致。
 3. 取 `(floor u, floor v)` 的四邻域 stencil；stencil 任一像素越界
    （图像最后一行/列）→ `unknown/missing_neighbor`。
 4. 四个邻点任一在 `disabled` mask 中为 True → `unknown/masked_pixel`。
@@ -99,16 +110,20 @@ from visibility import (
 
 ## 设计取舍
 
-- 深度口径固定为相机 z（非欧氏距离），与题目一致。
+- 深度口径固定为相机 z（非欧氏距离），透视与正交一致。
+- 透视与正交只在“相机坐标 → 像素”这一步不同；深度比较、四邻域
+  双线性、unknown 语义、跨视图聚合规则全部共用，保证两类视图混合
+  裁定时互不影响。
 - 像素中心位于整数坐标；投影在最后一行/列（缺少 +1 邻点）一律
   unknown，而非退化到单点/双点插值，避免歧义。
-- 内参仅支持“针孔 + 可选斜切”的严格子集（`K10==0`、`K[2]==(0,0,1)`），
-  不宣称与完整行业标准（畸变模型、任意 K 结构等）兼容。
+- 内参仅支持“透视针孔或正交 + 可选斜切”的严格子集（`K10==0`、
+  `K[2]==(0,0,1)`），不宣称与完整行业标准（畸变模型、全景、任意 K
+  结构等）兼容。
 - 纯函数式、无隐藏状态；输入对象不可变（frozen dataclass + 元组）。
 
 ## 已知限制
 
-- 不支持镜头畸变、正交/全景相机、非矩形深度图。
+- 不支持镜头畸变、全景相机、非矩形深度图。
 - 不做亚像素外推与图像边界外的任何采样。
 - 深度图只携带表面单层深度，不处理透明/多表面。
 - 批量规模按 Python 列表/元组传入；32×32 是单图边界，库不额外限制
@@ -117,7 +132,8 @@ from visibility import (
 ## 测试与独立性说明
 
 - `tests/test_visibility.py`：像素中心手算常量、容差边界、遮挡边缘、
-  相机后点、缺邻域、mask 禁用、多视图聚合与输入校验。
+  相机后点、缺邻域、mask 禁用、正交相机（无透视除法、深度仍为 z、
+  边界 unknown、与透视混合互不影响）、多视图聚合与输入校验。
 - `tests/reference.py`：**独立参考实现**，不导入被测核心；测试用它
   交叉核对，另以手工常量作为期望值主来源，投影↔逆投影的往返一致
   仅作补充检查。

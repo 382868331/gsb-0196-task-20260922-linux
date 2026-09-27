@@ -3,8 +3,13 @@
 全部为不可值对象（``frozen=True``），深度图在构造时做防御性拷贝，
 外部后续修改传入的列表不会影响已构造的 :class:`DepthMap`。
 
-相机约定
---------
+相机约定（两类视图共用同一套深度/采样语义）
+------------------------------------------------
+
+支持两类投影模型，由 :class:`CameraModel` 区分，两类相机可以混合出现在
+同一次多视图裁定中，彼此独立、互不影响：
+
+**透视（针孔）相机** :attr:`CameraModel.PERSPECTIVE`（默认）。
 世界点 ``P = (X, Y, Z)`` 先经世界->相机刚体变换::
 
     p_cam = R @ P + t
@@ -15,6 +20,17 @@
     u = K00 * cx / cz + K01 * cy / cz + K02
     v = K11 * cy / cz + K12
     (w = 1)
+
+**正交相机** :attr:`CameraModel.ORTHOGRAPHIC`：相机坐标与深度定义完全
+相同（``p_cam = R @ P + t``，深度仍为 ``cz``），但内参 ``K`` 直接把相机
+x/y 仿射映射到像素，**不做透视除法**::
+
+    u = K00 * cx + K01 * cy + K02
+    v = K11 * cy + K12
+
+即 ``K00/K11`` 是“像素/世界单位”的正交比例尺（必须 > 0），``K02/K12``
+仍是像素主点。无论点远近，投影像素只由相机 x/y 决定；绝不能把透视公式
+里的 ``/cz`` 套用到正交相机。两类模型都先判 ``cz > 0`` 再投影。
 
 像素中心位于整数坐标 (u, v)；深度图像素 (row=v, col=u)。因此
 ``K02`` 为列方向主点、``K12`` 为行方向主点。``K[2]`` 必须恰为
@@ -54,6 +70,16 @@ class Visibility(enum.Enum):
     """点在相机后方、投影越界、插值邻域缺失/被禁用。"""
 
 
+class CameraModel(enum.Enum):
+    """相机投影模型。两类视图可混合参与同一次裁定。"""
+
+    PERSPECTIVE = "perspective"
+    """透视（针孔）：像素 = K @ (cx/cz, cy/cz, 1)，含透视除法。"""
+
+    ORTHOGRAPHIC = "orthographic"
+    """正交：像素 = K @ (cx, cy, 1)，不做透视除法；深度仍为相机 z。"""
+
+
 class Reason(enum.Enum):
     """``UNKNOWN`` 的细分原因；非 unknown 状态为 ``NONE``。"""
 
@@ -66,11 +92,16 @@ class Reason(enum.Enum):
 
 @dataclass(frozen=True)
 class Camera:
-    """针孔相机：3x3 内参 ``K``、3x3 旋转 ``R``、3 维平移 ``t``。"""
+    """相机：3x3 内参 ``K``、3x3 旋转 ``R``、3 维平移 ``t``。
+
+    ``model`` 选择投影模型（见 :class:`CameraModel`），默认为
+    :attr:`CameraModel.PERSPECTIVE`（透视/针孔）。
+    """
 
     K: Mat3
     R: Mat3
     t: Vec3
+    model: CameraModel = CameraModel.PERSPECTIVE
 
     def __post_init__(self) -> None:
         from .validation import _require_mat3, _require_vec3, validate_camera
@@ -81,6 +112,11 @@ class Camera:
         object.__setattr__(self, "K", K)
         object.__setattr__(self, "R", R)
         object.__setattr__(self, "t", t)
+        if not isinstance(self.model, CameraModel):
+            raise InvalidCameraError(
+                "model must be a visibility.CameraModel member, got "
+                f"{type(self.model).__name__}"
+            )
         validate_camera(self)
 
     def project(self, point: Vec3) -> tuple[float, float, float]:
@@ -94,6 +130,36 @@ class Camera:
         y = r1[0] * point[0] + r1[1] * point[1] + r1[2] * point[2] + self.t[1]
         z = r2[0] * point[0] + r2[1] * point[1] + r2[2] * point[2] + self.t[2]
         return x, y, z
+
+    def project_pixels(
+        self, cx: float, cy: float, cz: float
+    ) -> tuple[float, float]:
+        """相机坐标 -> 像素 ``(u, v)``。调用前必须已确保 ``cz > 0``。
+
+        透视模型除以 ``cz``；正交模型不除（投影与深度无关）。
+        """
+        K = self.K
+        if self.model is CameraModel.ORTHOGRAPHIC:
+            u = K[0][0] * cx + K[0][1] * cy + K[0][2]
+            v = K[1][1] * cy + K[1][2]
+            return u, v
+        inv_z = 1.0 / cz
+        u = (K[0][0] * cx + K[0][1] * cy) * inv_z + K[0][2]
+        v = K[1][1] * cy * inv_z + K[1][2]
+        return u, v
+
+
+class OrthographicCamera(Camera):
+    """正交相机：``K`` 为像素仿射，投影不做透视除法。
+
+    其余字段（``R``、``t``）与深度含义（相机 z）与透视相机完全相同。
+    是 :class:`Camera` 的子类，可直接用于 :class:`View`。
+    """
+
+    def __init__(self, K: Mat3, R: Mat3, t: Vec3) -> None:
+        super().__init__(
+            K=K, R=R, t=t, model=CameraModel.ORTHOGRAPHIC
+        )
 
 
 @dataclass(frozen=True)

@@ -3,11 +3,13 @@
 裁定顺序（严格按契约）
 ----------------------
 
-对每个 (视图, 世界点)：
+对每个 (视图, 世界点)（透视/正交两类视图共用本流程，仅第 2 步投影不同）：
 
 1. 刚体变换得相机坐标 ``(cx, cy, cz)``。**先判 ``cz > 0``**；
    ``cz <= 0`` 直接 ``unknown/behind_camera``，不继续投影。
-2. 针孔投影到像素 ``(u, v)``。
+2. 投影到像素 ``(u, v)``：透视相机做透视除法
+   (``u = fx*cx/cz + ...``)；正交相机**不除 ``cz``**
+   (``u = fx*cx + ...``)，投影像素与深度无关。
 3. 取四邻域 stencil：``(floor u, floor v)`` 及其 +1 两点构成的 4 个
    像素。投影点落在图像覆盖范围之外 -> ``unknown/out_of_bounds``。
 4. 四点必须**全部在界内且未被 mask 禁用**：stencil 越界 ->
@@ -44,15 +46,6 @@ DEFAULT_ABS_TOL = 1e-6
 """默认绝对容差，与深度同单位。"""
 DEFAULT_REL_TOL = 1e-6
 """默认相对容差（无量纲，乘以采样深度）。"""
-
-
-def _pixel_coords(cam: Camera, cx: float, cy: float, cz: float) -> tuple[float, float]:
-    """针孔投影：相机坐标 -> 像素 (u=列, v=行)。调用前已确保 cz > 0。"""
-    K = cam.K
-    inv_z = 1.0 / cz
-    u = (K[0][0] * cx + K[0][1] * cy) * inv_z + K[0][2]
-    v = K[1][1] * cy * inv_z + K[1][2]
-    return u, v
 
 
 def _sample_bilinear(
@@ -131,7 +124,8 @@ def classify_view(
             v=None,
         )
 
-    u, v = _pixel_coords(view.camera, cx, cy, cz)
+    # 按相机模型投影：透视做 /cz，正交不做。采样与深度比较规则两者共用。
+    u, v = view.camera.project_pixels(cx, cy, cz)
     sampled, reason = _sample_bilinear(view.depth_map, u, v)
     if sampled is None:
         return ViewStatus(
