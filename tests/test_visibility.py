@@ -21,6 +21,7 @@ from tests import reference as ref  # noqa: E402
 
 from visibility import (  # noqa: E402
     Camera,
+    CameraModel,
     DepthMap,
     InvalidCameraError,
     InvalidDepthMapError,
@@ -400,6 +401,174 @@ class BoundarySizeTests(unittest.TestCase):
         # 投影在 (0,0) 像素中心：缺行/列 1？列1存在（宽32），有效。
         st = classify_view(view, (0.0, 0.0, 3.0), abs_tol=0.0, rel_tol=0.0)
         self.assertEqual(st.visibility, Visibility.VISIBLE)
+
+
+class OrthographicCameraTests(unittest.TestCase):
+    """正交相机：无透视除法，深度仍为相机 z。"""
+
+    Ko = ((10.0, 0.0, 0.0), (0.0, 10.0, 0.0), (0.0, 0.0, 1.0))
+
+    def ortho_camera(self, K=Ko, R=IDENT, t=ZERO):
+        return Camera(K=K, R=R, t=t, model=CameraModel.ORTHOGRAPHIC)
+
+    def test_pixel_center_no_perspective_division(self):
+        dm = plane_depth(4, 4, 5.0)
+        view = View(self.ortho_camera(), dm)
+        st = classify_view(view, (0.1, 0.05, 5.0), abs_tol=0.0, rel_tol=0.0)
+        self.assertEqual(st.visibility, Visibility.VISIBLE)
+        self.assertEqual((st.u, st.v), (1.0, 0.5))
+        self.assertEqual(st.projected_z, 5.0)
+        self.assertEqual(st.sampled_depth, 5.0)
+
+    def test_depth_change_does_not_move_pixels(self):
+        dm = plane_depth(4, 4, 5.0)
+        view = View(self.ortho_camera(), dm)
+        statuses = [
+            classify_view(view, (0.1, 0.05, z), abs_tol=0.0, rel_tol=0.0)
+            for z in (4.0, 5.0, 6.0)
+        ]
+        self.assertEqual([s.u for s in statuses], [1.0, 1.0, 1.0])
+        self.assertEqual([s.v for s in statuses], [0.5, 0.5, 0.5])
+        self.assertEqual(
+            [s.visibility for s in statuses],
+            [Visibility.IN_FRONT, Visibility.VISIBLE, Visibility.OCCLUDED],
+        )
+
+    def test_perspective_division_not_reused_for_ortho(self):
+        P = (0.3, 0.1, 6.0)
+        pin = View(make_camera(K=self.Ko), plane_depth(8, 8, 6.0))
+        ort = View(self.ortho_camera(), plane_depth(8, 8, 6.0))
+        st_p = classify_view(pin, P, abs_tol=0.0, rel_tol=0.0)
+        st_o = classify_view(ort, P, abs_tol=0.0, rel_tol=0.0)
+        self.assertEqual((st_p.u, st_p.v), (0.5, 1.0 / 6.0))
+        self.assertEqual((st_o.u, st_o.v), (3.0, 1.0))
+
+    def test_behind_camera_still_uses_z(self):
+        view = View(self.ortho_camera(), plane_depth(4, 4, 5.0))
+        for P in ((0.0, 0.0, 0.0), (0.1, 0.05, -2.0)):
+            st = classify_view(view, P)
+            self.assertEqual(st.visibility, Visibility.UNKNOWN)
+            self.assertEqual(st.reason, Reason.BEHIND_CAMERA)
+            self.assertIsNone(st.u)
+            self.assertLessEqual(st.projected_z, 0.0)
+
+    def test_bounds_and_missing_neighbor_unknown(self):
+        dm = plane_depth(4, 4, 5.0)
+        view = View(self.ortho_camera(), dm)
+        st = classify_view(view, (0.5, 0.05, 5.0), abs_tol=0.0, rel_tol=0.0)
+        self.assertEqual((st.visibility, st.reason),
+                         (Visibility.UNKNOWN, Reason.OUT_OF_BOUNDS))
+        st2 = classify_view(view, (0.3, 0.05, 5.0), abs_tol=0.0, rel_tol=0.0)
+        self.assertEqual(st2.u, 3.0)
+        self.assertEqual((st2.visibility, st2.reason),
+                         (Visibility.UNKNOWN, Reason.MISSING_NEIGHBOR))
+
+    def test_masked_neighbor_unknown(self):
+        w = h = 4
+        mask = [[False for _ in range(w)] for _ in range(h)]
+        mask[1][2] = True
+        view = View(self.ortho_camera(),
+                    DepthMap([[5.0] * w for _ in range(h)], mask))
+        st = classify_view(view, (0.15, 0.05, 5.0), abs_tol=0.0, rel_tol=0.0)
+        self.assertEqual((st.u, st.v), (1.5, 0.5))
+        self.assertEqual((st.visibility, st.reason),
+                         (Visibility.UNKNOWN, Reason.MASKED_PIXEL))
+
+    def test_reference_cross_check_orthographic(self):
+        w = h = 6
+        vals = [[3.0 + 0.07 * c + 0.11 * r for c in range(w)] for r in range(h)]
+        mask = [[False for _ in range(w)] for _ in range(h)]
+        mask[1][2] = True
+        view = View(self.ortho_camera(), DepthMap(vals, mask))
+        for i in range(-1, 9):
+            for j in range(-1, 9):
+                for z in (2.0, 5.0, 8.0):
+                    P = (0.03 * i - 0.04, 0.027 * j - 0.03, z)
+                    got = classify_view(view, P, abs_tol=0.02, rel_tol=0.01)
+                    exp = ref.classify(
+                        self.Ko, IDENT, ZERO, vals, mask, P, 0.02, 0.01,
+                        model="orthographic",
+                    )
+                    self.assertEqual(
+                        got.visibility.value, exp["visibility"],
+                        msg=f"ortho probe {P}",
+                    )
+                    self.assertEqual(got.reason.value, exp["reason"])
+                    if exp["u"] is not None:
+                        self.assertAlmostEqual(got.u, exp["u"], places=12)
+
+    def test_ortho_skew_scale_cross_check(self):
+        Ks = ((8.0, 2.0, 1.5), (0.0, 6.0, 2.5), (0.0, 0.0, 1.0))
+        w = h = 6
+        vals = [[4.0 + 0.05 * c + 0.03 * r for c in range(w)] for r in range(h)]
+        mask = [[False] * w for _ in range(h)]
+        view = View(self.ortho_camera(K=Ks), DepthMap(vals, mask))
+        for (u0, v0, z) in [(1.2, 1.3, 4.5), (3.7, 2.2, 5.5), (0.5, 0.5, 4.0)]:
+            P = ref.world_point_at_pixel(
+                Ks, IDENT, ZERO, u0, v0, z, model="orthographic")
+            got = classify_view(view, P, abs_tol=0.01, rel_tol=0.01)
+            exp = ref.classify(Ks, IDENT, ZERO, vals, mask, P, 0.01, 0.01,
+                               model="orthographic")
+            self.assertEqual(got.visibility.value, exp["visibility"])
+            self.assertAlmostEqual(got.u, u0, places=9)
+            self.assertAlmostEqual(got.v, v0, places=9)
+
+    def test_rotated_orthographic_cross_check(self):
+        a = math.radians(15.0)
+        ca, sa = math.cos(a), math.sin(a)
+        R = ((ca, 0.0, sa), (0.0, 1.0, 0.0), (-sa, 0.0, ca))
+        t = (0.2, -0.1, 0.4)
+        w = h = 8
+        vals = [[6.0 for _ in range(w)] for _ in range(h)]
+        mask = [[False] * w for _ in range(h)]
+        view = View(self.ortho_camera(R=R, t=t), DepthMap(vals, mask))
+        for u0, v0 in [(1.0, 2.0), (3.5, 4.5), (0.2, 6.0)]:
+            P = ref.world_point_at_pixel(
+                self.Ko, R, t, u0, v0, 6.0, model="orthographic")
+            got = classify_view(view, P)
+            exp = ref.classify(self.Ko, R, t, vals, mask, P, 1e-6, 1e-6,
+                               model="orthographic")
+            self.assertEqual(got.visibility.value, exp["visibility"])
+            self.assertAlmostEqual(got.u, u0, places=9)
+        P_behind = ref.world_point_at_pixel(
+            self.Ko, R, t, 3.0, 3.0, -1.0, model="orthographic")
+        self.assertEqual(
+            classify_view(view, P_behind).reason, Reason.BEHIND_CAMERA
+        )
+
+    def test_mixed_views_independent_and_aggregation(self):
+        P = (0.05, 0.05, 5.0)
+        pin_surf = View(make_camera(K=self.Ko), plane_depth(4, 4, 5.0))
+        ort_surf = View(self.ortho_camera(), plane_depth(4, 4, 5.0))
+        ort_near = View(self.ortho_camera(), plane_depth(4, 4, 3.0))
+        mask = [[True] * 4 for _ in range(4)]
+        ort_masked = View(
+            self.ortho_camera(), DepthMap([[5.0] * 4 for _ in range(4)], mask))
+        results = classify_points(
+            [pin_surf, ort_surf, ort_near, ort_masked], [P],
+            abs_tol=1e-9, rel_tol=0.0,
+        )[0]
+        self.assertEqual(results[0].visibility, Visibility.VISIBLE)
+        self.assertAlmostEqual(results[0].u, 0.1, places=9)
+        self.assertEqual(results[1].visibility, Visibility.VISIBLE)
+        self.assertEqual(results[1].u, 0.5)
+        self.assertEqual(results[2].visibility, Visibility.OCCLUDED)
+        self.assertEqual(results[3].reason, Reason.MASKED_PIXEL)
+        matrix = [results]
+        self.assertEqual(indices_visible_in_at_least_k(matrix, 1), [0])
+        self.assertEqual(indices_visible_in_at_least_k(matrix, 2), [0])
+        self.assertEqual(indices_visible_in_at_least_k(matrix, 3), [])
+
+    def test_model_validation(self):
+        cam_default = Camera(K=self.Ko, R=IDENT, t=ZERO)
+        self.assertIs(cam_default.model, CameraModel.PINHOLE)
+        with self.assertRaises(InvalidCameraError):
+            Camera(K=self.Ko, R=IDENT, t=ZERO, model="orthographic")
+        with self.assertRaises(InvalidCameraError):
+            Camera(K=self.Ko, R=IDENT, t=ZERO, model=None)
+        with self.assertRaises(InvalidCameraError):
+            Camera(K=((0.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
+                   R=IDENT, t=ZERO, model=CameraModel.ORTHOGRAPHIC)
 
 
 if __name__ == "__main__":

@@ -7,7 +7,8 @@
 
 1. 刚体变换得相机坐标 ``(cx, cy, cz)``。**先判 ``cz > 0``**；
    ``cz <= 0`` 直接 ``unknown/behind_camera``，不继续投影。
-2. 针孔投影到像素 ``(u, v)``。
+2. 投影到像素 ``(u, v)``。针孔模型做透视除法（/cz）；正交模型
+   直接用比例尺乘相机坐标，不除 z。两者深度含义相同（相机 z）。
 3. 取四邻域 stencil：``(floor u, floor v)`` 及其 +1 两点构成的 4 个
    像素。投影点落在图像覆盖范围之外 -> ``unknown/out_of_bounds``。
 4. 四点必须**全部在界内且未被 mask 禁用**：stencil 越界 ->
@@ -31,7 +32,6 @@ from collections.abc import Sequence
 
 from .errors import InvalidParameterError
 from .types import (
-    Camera,
     DepthMap,
     Reason,
     View,
@@ -44,15 +44,6 @@ DEFAULT_ABS_TOL = 1e-6
 """默认绝对容差，与深度同单位。"""
 DEFAULT_REL_TOL = 1e-6
 """默认相对容差（无量纲，乘以采样深度）。"""
-
-
-def _pixel_coords(cam: Camera, cx: float, cy: float, cz: float) -> tuple[float, float]:
-    """针孔投影：相机坐标 -> 像素 (u=列, v=行)。调用前已确保 cz > 0。"""
-    K = cam.K
-    inv_z = 1.0 / cz
-    u = (K[0][0] * cx + K[0][1] * cy) * inv_z + K[0][2]
-    v = K[1][1] * cy * inv_z + K[1][2]
-    return u, v
 
 
 def _sample_bilinear(
@@ -131,7 +122,7 @@ def classify_view(
             v=None,
         )
 
-    u, v = _pixel_coords(view.camera, cx, cy, cz)
+    u, v = view.camera.pixel_coords(cx, cy, cz)
     sampled, reason = _sample_bilinear(view.depth_map, u, v)
     if sampled is None:
         return ViewStatus(

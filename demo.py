@@ -7,13 +7,16 @@ sleep、无预录结果）。演示数据在本文件内确定性构造：
 - 6 个世界点，分别触发 visible / occluded / in_front 以及
   behind_camera / missing_neighbor / masked_pixel 三类 unknown；
 - 多视图聚合（至少 k 个视图 visible）；
-- 末尾实际触发一次输入拒绝（NaN 世界点）并打印定位信息。
+- 末尾实际触发一次输入拒绝（NaN 世界点）并打印定位信息；
+- 另含 1 个正交视图：投影不做透视除法，深度含义仍为相机 z，
+  可与针孔视图混合参与同一批裁定与聚合。
 """
 
 from __future__ import annotations
 
 from visibility import (
     Camera,
+    CameraModel,
     DepthMap,
     InvalidPointError,
     Reason,
@@ -89,18 +92,56 @@ def main() -> None:
     )
 
     # --- 多视图聚合 --------------------------------------------------------
-    print("\n== 多视图聚合（每点至少 k 个视图 visible 才入选） ==")
+    # 正交视图与针孔视图混合：各视图独立投影与裁定，聚合规则不变。
+    SCALE = 20.0
+    K_ortho = (
+        (SCALE, 0.0, CX),
+        (0.0, SCALE, CY),
+        (0.0, 0.0, 1.0),
+    )
+    cam_ortho = Camera(K=K_ortho, R=IDENT, t=ORIGIN,
+                       model=CameraModel.ORTHOGRAPHIC)
+    view_ortho = View(cam_ortho, DepthMap([row[:] for row in plane]))
+
+    def ortho_point(u, v, z):
+        return (u - CX) / SCALE, (v - CY) / SCALE, z
+
+    print("\n== 正交视图：u=s*cx+主点（不除 z），深度仍为相机 z ==")
+    for name, P in (
+        ("正交表面上(visible) ", ortho_point(2.5, 2.5, SURFACE_Z)),
+        ("正交表面后(occluded)", ortho_point(2.5, 2.5, 7.5)),
+        ("正交表面前(in_front)", ortho_point(2.5, 2.5, 4.5)),
+        ("正交相机后(behind)  ", ortho_point(2.5, 2.5, -1.0)),
+    ):
+        st = classify_view(view_ortho, P)
+        tag = st.visibility.value
+        if st.visibility is Visibility.UNKNOWN:
+            tag += "/" + st.reason.value
+        uv = "None" if st.u is None else f"({st.u:.2f},{st.v:.2f})"
+        print(f"{name} {tag:<18} (u,v)={uv} projected_z={st.projected_z}")
+
+    P_same = (0.1, 0.05, 8.0)
+    st_pin = classify_view(views[0], P_same)
+    st_ort = classify_view(view_ortho, P_same)
+    print(
+        f"同一点 (0.1,0.05,8)：针孔像素 ({st_pin.u:.3f},{st_pin.v:.3f}) 含 /z；"
+        f"正交像素 ({st_ort.u:.2f},{st_ort.v:.2f}) 与 z 无关"
+    )
+
+    print("\n== 多视图混合聚合（3 针孔 + 1 正交，每点至少 k 个 visible） ==")
     points = [P for _, P in probes]
-    results = classify_points(views, points)
+    mixed_views = views + [view_ortho]
+    results = classify_points(mixed_views, points)
     for i, row in enumerate(results):
         states = ", ".join(
             f"v{i_view}:{s.visibility.value}" for i_view, s in enumerate(row)
         )
         print(f"点{i} [{states}]")
-    for k in (1, 2, 3):
+    for k in (1, 2, 3, 4):
         chosen = indices_visible_in_at_least_k(results, k)
         print(f"k={k}: 入选点下标 = {chosen}")
-    print("说明：occluded/in_front/unknown 均不计为可见，且不做跨视图投票翻转。")
+    print("说明：末列为正交视图；occluded/in_front/unknown 均不计为可见，"
+          "且不做跨视图投票翻转。")
 
     # --- 实际触发的拒绝边界 ------------------------------------------------
     print("\n== 输入拒绝边界（NaN 必须被拒绝，不静默纠正） ==")
